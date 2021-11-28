@@ -7,10 +7,12 @@
 use cortex_m_rt::entry;
 use defmt::*;
 use defmt_rtt as _;
+use embedded_hal::digital::v2::InputPin;
 use embedded_hal::digital::v2::OutputPin;
 use embedded_time::fixed_point::FixedPoint;
 use panic_probe as _;
 use rp2040_hal as hal;
+use rp2040_unicorn::PicoUnicorn;
 
 use hal::{
     clocks::{init_clocks_and_plls, Clock},
@@ -54,14 +56,26 @@ fn main() -> ! {
         &mut pac.RESETS,
     );
 
-    let mut led_pin = pins.gpio25.into_push_pull_output();
+    // let mut led_pin = pins.gpio25.into_push_pull_output();
+    let mut unicorn = PicoUnicorn::new(pins);
 
     loop {
-        info!("on!");
-        led_pin.set_high().unwrap();
-        delay.delay_ms(500);
-        info!("off!");
-        led_pin.set_low().unwrap();
-        delay.delay_ms(500);
+        if unicorn.pins.btn_a.is_high().unwrap() {
+            unicorn.pins.led.set_high().unwrap();
+        } else {
+            unicorn.pins.led.set_low().unwrap();
+        }
+        delay.delay_ms(25);
     }
+
+    //
+
+    // loop {
+    //     info!("on!");
+    //     led_pin.set_high().unwrap();
+    //     delay.delay_ms(500);
+    //     info!("off!");
+    //     led_pin.set_low().unwrap();
+    //     delay.delay_ms(500);
+    // }
 }
