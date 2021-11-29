@@ -1,129 +1,138 @@
 #![no_std]
 #![no_main]
 
-use hal::gpio::{pin, Pins};
-// use micromath::F32Ext;
-use rp2040_hal as hal;
+pub extern crate rp2040_hal as hal;
 
-pub const WIDTH: usize = 16;
-pub const HEIGHT: usize = 7;
+use display_interface_spi::SPIInterface;
+use embedded_graphics::{
+    draw_target::DrawTarget,
+    pixelcolor::{Rgb565, RgbColor},
+};
+use embedded_hal::{blocking::delay::DelayUs, digital::v2::OutputPin, spi::MODE_0};
+use embedded_time::rate::*;
+use hal::{gpio::pin, pac, sio, spi};
+use st7789::ST7789;
 
-pub const BTN_A: usize = 12;
-pub const BTN_B: usize = 13;
-pub const BTN_X: usize = 14;
-pub const BTN_Y: usize = 15;
+mod internal_pin {
+    hal::bsp_pins!(
+        Gpio0 { name: gpio0 },
+        Gpio1 { name: gpio1 },
+        Gpio2 { name: gpio2 },
+        Gpio3 { name: gpio3 },
+        Gpio4 { name: gpio4 },
+        Gpio5 { name: gpio5 },
+        Gpio6 { name: led_r },
+        Gpio7 { name: led_g },
+        Gpio8 { name: led_b },
+        Gpio9 { name: gpio9 },
+        Gpio10 { name: gpio10 },
+        Gpio11 { name: gpio11 },
+        Gpio12 { name: btn_a },
+        Gpio13 { name: btn_b },
+        Gpio14 { name: btn_x },
+        Gpio15 { name: btn_y },
+        Gpio16 {
+            name: lcd_dc,
+            aliases: { FunctionSpi: Miso }
+        },
+        Gpio17 {
+            name: lcd_cs,
+            aliases: { FunctionSpi: LcdCs }
+        },
+        Gpio18 {
+            name: spi_sclk,
+            aliases: { FunctionSpi: Sclk }
+        },
+        Gpio19 {
+            name: spi_mosi,
+            aliases: { FunctionSpi: Mosi }
+        },
+        Gpio20 { name: bl_en },
+        Gpio21 { name: gpio21 },
+        Gpio22 { name: i2c_int },
+        Gpio23 { name: b_power_save },
+        Gpio24 { name: vbus_detect },
+        Gpio25 { name: led },
+        Gpio26 { name: adc0 },
+        Gpio27 { name: adc1 },
+        Gpio28 { name: adc2 },
+        Gpio29 {
+            name: voltage_monitor
+        },
+    );
+}
 
-// const ROW_BYTES: usize = 12;
-// const BCD_FRAMES: usize = 15;
-// const BITSTREAM_LENGTH: usize = HEIGHT * ROW_BYTES * BCD_FRAMES;
+pub struct DummyPin;
 
-// fn get_gamma_lut() -> [[u16; 256]; 3] {
-//     let mut gamma_lut = [[0; 256]; 3];
-//     // Create 14-bits gamma luts
-//     let gamma: f32 = 2.8;
-//     for i in 0..256 {
-//         gamma_lut[0][i] = ((i as f32 / 255.0).powf(gamma) * 16383.0 + 0.5) as u16;
-//         gamma_lut[0][i] = ((i as f32 / 255.0).powf(gamma) * 16383.0 + 0.5) as u16;
-//         gamma_lut[0][i] = ((i as f32 / 255.0).powf(gamma) * 16383.0 + 0.5) as u16;
-//     }
-//     gamma_lut
-// }
+impl OutputPin for DummyPin {
+    type Error = ();
 
-pub struct UnicornPins {
-    pub data: pin::Pin<pin::bank0::Gpio8, pin::PushPullOutput>,
-    pub clock: pin::Pin<pin::bank0::Gpio9, pin::PushPullOutput>,
-    pub latch: pin::Pin<pin::bank0::Gpio10, pin::PushPullOutput>,
-    pub blank: pin::Pin<pin::bank0::Gpio11, pin::PushPullOutput>,
+    fn set_high(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+    fn set_low(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
 
-    pub row_0: pin::Pin<pin::bank0::Gpio22, pin::PushPullOutput>,
-    pub row_1: pin::Pin<pin::bank0::Gpio21, pin::PushPullOutput>,
-    pub row_2: pin::Pin<pin::bank0::Gpio20, pin::PushPullOutput>,
-    pub row_3: pin::Pin<pin::bank0::Gpio19, pin::PushPullOutput>,
-    pub row_4: pin::Pin<pin::bank0::Gpio18, pin::PushPullOutput>,
-    pub row_5: pin::Pin<pin::bank0::Gpio17, pin::PushPullOutput>,
-    pub row_6: pin::Pin<pin::bank0::Gpio16, pin::PushPullOutput>,
+pub type Screen = ST7789<
+    SPIInterface<
+        spi::Spi<spi::Enabled, pac::SPI0, 8>,
+        pin::Pin<pin::bank0::Gpio16, pin::PushPullOutput>,
+        pin::Pin<pin::bank0::Gpio17, pin::PushPullOutput>,
+    >,
+    DummyPin,
+>;
 
-    pub btn_a: pin::Pin<pin::bank0::Gpio12, pin::Input<pin::PullUp>>,
-    pub btn_b: pin::Pin<pin::bank0::Gpio13, pin::Input<pin::PullUp>>,
-    pub btn_x: pin::Pin<pin::bank0::Gpio14, pin::Input<pin::PullUp>>,
-    pub btn_y: pin::Pin<pin::bank0::Gpio15, pin::Input<pin::PullUp>>,
-
+pub struct PicoDisplay {
+    pub a: pin::Pin<pin::bank0::Gpio12, pin::PullUpInput>,
+    pub b: pin::Pin<pin::bank0::Gpio13, pin::PullUpInput>,
+    pub x: pin::Pin<pin::bank0::Gpio14, pin::PullUpInput>,
+    pub y: pin::Pin<pin::bank0::Gpio15, pin::PullUpInput>,
     pub led: pin::Pin<pin::bank0::Gpio25, pin::PushPullOutput>,
+
+    pub screen: Screen,
 }
 
-/// Implementation of the Unicorn HAT's GPIO pins.
-///
-/// This is a re-implementation from the C++ one from Pimoroni.
-/// See https://github.com/pimoroni/pimoroni-pico/blob/main/libraries/pico_unicorn/pico_unicorn.cpp
-pub struct PicoUnicorn {
-    pub pins: UnicornPins,
-    // gamma_lut: [[u16; 256]; 3],
-    // bitstream: [u8; BITSTREAM_LENGTH as usize],
-}
+impl PicoDisplay {
+    pub fn new(
+        io: pac::IO_BANK0,
+        pads: pac::PADS_BANK0,
+        sio: sio::SioGpioBank0,
+        spi0: pac::SPI0,
+        resets: &mut pac::RESETS,
+        delay: &mut impl DelayUs<u32>,
+    ) -> Self {
+        let pins = internal_pin::Pins::new(io, pads, sio, resets);
 
-impl PicoUnicorn {
-    pub fn new(pins: Pins) -> Self {
-        // Initialize all the pins for the Unicorn HAT
-        let pins = UnicornPins {
-            // Setup pins
-            data: pins.gpio8.into_push_pull_output(),
-            clock: pins.gpio9.into_push_pull_output(),
-            latch: pins.gpio10.into_push_pull_output(),
-            blank: pins.gpio11.into_push_pull_output(),
+        // Initialise screen
+        let dc = pins.lcd_dc.into_push_pull_output();
+        let cs = pins.lcd_cs.into_push_pull_output();
+        let _spi_sclk = pins.spi_sclk.into_mode::<pin::FunctionSpi>();
+        let _spi_mosi = pins.spi_mosi.into_mode::<pin::FunctionSpi>();
 
-            row_0: pins.gpio22.into_push_pull_output(),
-            row_1: pins.gpio21.into_push_pull_output(),
-            row_2: pins.gpio20.into_push_pull_output(),
-            row_3: pins.gpio19.into_push_pull_output(),
-            row_4: pins.gpio18.into_push_pull_output(),
-            row_5: pins.gpio17.into_push_pull_output(),
-            row_6: pins.gpio16.into_push_pull_output(),
+        let spi_screen = spi::Spi::<_, _, 8>::new(spi0).init(
+            resets,
+            125_000_000u32.Hz(),
+            16_000_000u32.Hz(),
+            &MODE_0,
+        );
+        let spii_screen = SPIInterface::new(spi_screen, dc, cs);
 
-            // Setup button inputs
-            btn_a: pins.gpio12.into_pull_up_input(),
-            btn_b: pins.gpio13.into_pull_up_input(),
-            btn_x: pins.gpio14.into_pull_up_input(),
-            btn_y: pins.gpio15.into_pull_up_input(),
+        let mut screen = ST7789::new(spii_screen, DummyPin, 135, 240);
+        screen.init(delay).unwrap();
+        screen
+            .set_orientation(st7789::Orientation::Portrait)
+            .unwrap();
+        screen.clear(Rgb565::RED).unwrap();
 
-            // Onboard LED
-            led: pins.gpio25.into_push_pull_output(),
-        };
-
-        // // Initialize the BCD timing values and row selects in the bitstream
-        // let mut bitstream: [u8; BITSTREAM_LENGTH as usize] = [0; BITSTREAM_LENGTH as usize];
-        // for row in 0..HEIGHT {
-        //     for frame in 0..BCD_FRAMES {
-        //         // Determine offset in the buffer for this row/frame
-        //         let offset = (row * ROW_BYTES * BCD_FRAMES) + (ROW_BYTES * frame);
-        //         let row_select_offset = offset + 9;
-        //         let bcd_offset = offset + 10;
-
-        //         // The last BCD frame is used to allow the fets to discharge to avoid ghosting
-        //         if frame == BCD_FRAMES - 1 {
-        //             bitstream[row_select_offset] = 0b11111111;
-
-        //             let bcd_ticks: u16 = 0xffff;
-        //             bitstream[bcd_offset + 1] = ((bcd_ticks & 0xff00) >> 8) as u8;
-        //             bitstream[bcd_offset] = (bcd_ticks & 0xff) as u8;
-
-        //             for col in 0..6 {
-        //                 bitstream[offset + col] = 0xff;
-        //             }
-        //         } else {
-        //             let row_select_mask = !(1 << (7 - row));
-        //             bitstream[row_select_offset] = row_select_mask;
-
-        //             let bcd_ticks = 2_u16.pow(frame as u32);
-        //             bitstream[bcd_offset + 1] = ((bcd_ticks & 0xff00) >> 8) as u8;
-        //             bitstream[bcd_offset] = (bcd_ticks & 0xff) as u8;
-        //         }
-        //     }
-        // }
-
-        PicoUnicorn {
-            pins,
-            // gamma_lut: get_gamma_lut(),
-            // bitstream,
+        Self {
+            a: pins.btn_a.into_pull_up_input(),
+            b: pins.btn_b.into_pull_up_input(),
+            x: pins.btn_x.into_pull_up_input(),
+            y: pins.btn_y.into_pull_up_input(),
+            led: pins.led.into_push_pull_output(),
+            screen,
         }
     }
 }

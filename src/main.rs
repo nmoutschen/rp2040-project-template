@@ -7,12 +7,12 @@
 use cortex_m_rt::entry;
 use defmt::*;
 use defmt_rtt as _;
-use embedded_hal::digital::v2::InputPin;
+use embedded_graphics::{pixelcolor::Rgb565, prelude::*, primitives::Rectangle};
 use embedded_hal::digital::v2::OutputPin;
 use embedded_time::fixed_point::FixedPoint;
 use panic_probe as _;
 use rp2040_hal as hal;
-use rp2040_unicorn::PicoUnicorn;
+use rp2040_test::PicoDisplay;
 
 use hal::{
     clocks::{init_clocks_and_plls, Clock},
@@ -49,33 +49,26 @@ fn main() -> ! {
 
     let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().integer());
 
-    let pins = hal::gpio::Pins::new(
+    let mut display = PicoDisplay::new(
         pac.IO_BANK0,
         pac.PADS_BANK0,
         sio.gpio_bank0,
+        pac.SPI0,
         &mut pac.RESETS,
+        &mut delay,
     );
 
-    // let mut led_pin = pins.gpio25.into_push_pull_output();
-    let mut unicorn = PicoUnicorn::new(pins);
+    let rect = Rectangle::new(Point::new(0, 10), Size::new(50, 80));
+    display.screen.fill_solid(&rect, Rgb565::BLUE).unwrap();
+    display
+        .screen
+        .set_pixel(32, 32, 0b0011100011100111)
+        .unwrap();
 
     loop {
-        if unicorn.pins.btn_a.is_high().unwrap() {
-            unicorn.pins.led.set_high().unwrap();
-        } else {
-            unicorn.pins.led.set_low().unwrap();
-        }
-        delay.delay_ms(25);
+        delay.delay_ms(500u32);
+        display.led.set_high().unwrap();
+        delay.delay_ms(500u32);
+        display.led.set_low().unwrap();
     }
-
-    //
-
-    // loop {
-    //     info!("on!");
-    //     led_pin.set_high().unwrap();
-    //     delay.delay_ms(500);
-    //     info!("off!");
-    //     led_pin.set_low().unwrap();
-    //     delay.delay_ms(500);
-    // }
 }
