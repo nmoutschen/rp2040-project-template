@@ -124,7 +124,7 @@ impl PicoDisplay {
         screen
             .set_orientation(st7789::Orientation::Portrait)
             .unwrap();
-        screen.clear(Rgb565::RED).unwrap();
+        screen.clear(Rgb565::BLACK).unwrap();
 
         Self {
             a: pins.btn_a.into_pull_up_input(),
