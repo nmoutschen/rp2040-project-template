@@ -21,9 +21,18 @@ mod internal_pin {
         Gpio3 { name: gpio3 },
         Gpio4 { name: gpio4 },
         Gpio5 { name: gpio5 },
-        Gpio6 { name: led_r },
-        Gpio7 { name: led_g },
-        Gpio8 { name: led_b },
+        Gpio6 {
+            name: led_r,
+            aliases: { FunctionPwm: LedRed }
+        },
+        Gpio7 {
+            name: led_g,
+            aliases: { FunctionPwm: LedGreen }
+        },
+        Gpio8 {
+            name: led_b,
+            aliases: { FunctionPwm: LedBlue }
+        },
         Gpio9 { name: gpio9 },
         Gpio10 { name: gpio10 },
         Gpio11 { name: gpio11 },
@@ -105,7 +114,13 @@ impl PicoDisplay {
     ) -> Self {
         let pins = internal_pin::Pins::new(io, pads, sio, resets);
 
-        // Initialise screen
+        // Turn RGB LED off
+        // TODO: add support for RGB LED
+        pins.led_r.into_push_pull_output().set_high().unwrap();
+        pins.led_g.into_push_pull_output().set_high().unwrap();
+        pins.led_b.into_push_pull_output().set_high().unwrap();
+
+        // Initialize screen
         let dc = pins.lcd_dc.into_push_pull_output();
         let cs = pins.lcd_cs.into_push_pull_output();
         let _spi_sclk = pins.spi_sclk.into_mode::<pin::FunctionSpi>();
@@ -132,6 +147,7 @@ impl PicoDisplay {
             x: pins.btn_x.into_pull_up_input(),
             y: pins.btn_y.into_pull_up_input(),
             led: pins.led.into_push_pull_output(),
+
             screen,
         }
     }
