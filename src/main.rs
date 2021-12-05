@@ -22,10 +22,10 @@ use embedded_graphics::{
     mono_font::{iso_8859_15::FONT_6X10, MonoTextStyleBuilder},
     pixelcolor::{Rgb565, RgbColor},
     prelude::*,
-    text::Text,
 };
 // The macro for marking our interrupt functions
 use rp2040_test::hal::pac::interrupt;
+use rp2040_test::terminal::{Terminal, TerminalBuilder};
 
 // GPIO traits
 use embedded_hal::digital::v2::OutputPin;
@@ -66,17 +66,30 @@ static mut USB_BUS: Option<UsbBusAllocator<hal::usb::UsbBus>> = None;
 /// The USB Serial Device Driver (shared with the interrupt).
 static mut USB_SERIAL: Option<SerialPort<hal::usb::UsbBus>> = None;
 
-static mut SCREEN: Option<
-    st7789::ST7789<
-        SPIInterface<
-            hal::spi::Spi<hal::spi::Enabled, pac::SPI0, 8>,
-            hal::gpio::pin::Pin<hal::gpio::pin::bank0::Gpio16, hal::gpio::pin::PushPullOutput>,
-            hal::gpio::pin::Pin<hal::gpio::pin::bank0::Gpio17, hal::gpio::pin::PushPullOutput>,
+// static mut SCREEN: Option<
+//     st7789::ST7789<
+//         SPIInterface<
+//             hal::spi::Spi<hal::spi::Enabled, pac::SPI0, 8>,
+//             hal::gpio::pin::Pin<hal::gpio::pin::bank0::Gpio16, hal::gpio::pin::PushPullOutput>,
+//             hal::gpio::pin::Pin<hal::gpio::pin::bank0::Gpio17, hal::gpio::pin::PushPullOutput>,
+//         >,
+//         rp2040_test::DummyPin,
+//     >,
+// > = None;
+// static mut SCREEN_POS: Option<Point> = None;
+static mut TERMINAL: Option<
+    Terminal<
+        Rgb565,
+        st7789::ST7789<
+            SPIInterface<
+                hal::spi::Spi<hal::spi::Enabled, pac::SPI0, 8>,
+                hal::gpio::pin::Pin<hal::gpio::pin::bank0::Gpio16, hal::gpio::pin::PushPullOutput>,
+                hal::gpio::pin::Pin<hal::gpio::pin::bank0::Gpio17, hal::gpio::pin::PushPullOutput>,
+            >,
+            rp2040_test::DummyPin,
         >,
-        rp2040_test::DummyPin,
     >,
 > = None;
-static mut SCREEN_POS: Option<Point> = None;
 
 static FERRIS: &[u8] = include_bytes!("../ferris.raw");
 
@@ -187,9 +200,22 @@ fn main() -> ! {
     let ferris_img = Image::new(&ferris, Point::new(40, 50));
     ferris_img.draw(&mut screen).unwrap();
 
+    // Setup the terminal
+    let mut terminal = TerminalBuilder::new(
+        screen,
+        MonoTextStyleBuilder::new()
+            .font(&FONT_6X10)
+            .text_color(Rgb565::RED)
+            .build(),
+    )
+    .with_offset(Point::new(40, 60))
+    .build();
+    terminal.write(b"Hello, world!\n");
+
     unsafe {
-        SCREEN = Some(screen);
-        SCREEN_POS = Some(Point::new(40, 100));
+        // SCREEN = Some(screen);
+        // SCREEN_POS = Some(Point::new(40, 100));
+        TERMINAL = Some(terminal);
     }
 
     // Enable the USB interrupt
@@ -247,24 +273,8 @@ unsafe fn USBCTRL_IRQ() {
             }
             Ok(count) => {
                 // Write to the screen
-                {
-                    let msg = core::str::from_utf8(&buf[0..count]).unwrap();
-                    let screen = SCREEN.as_mut().unwrap();
-                    let screen_pos = SCREEN_POS.as_mut().unwrap();
-                    let text_style = MonoTextStyleBuilder::new()
-                        .font(&FONT_6X10)
-                        .text_color(Rgb565::RED)
-                        .build();
-                    Text::new(msg, *screen_pos, text_style)
-                        .draw(screen)
-                        .unwrap();
-                    // Move the screen position based on character count
-                    screen_pos.x += (count * 6) as i32;
-                    if screen_pos.x >= 280 {
-                        screen_pos.x = 40;
-                        screen_pos.y += 10;
-                    }
-                }
+                let terminal = TERMINAL.as_mut().unwrap();
+                terminal.write(&buf[0..count]);
 
                 // Convert to lower case
                 buf.iter_mut().take(count).for_each(|b| {

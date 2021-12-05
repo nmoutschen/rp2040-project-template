@@ -6,6 +6,8 @@ pub extern crate rp2040_hal as hal;
 extern crate cortex_m_rt;
 pub use cortex_m_rt::entry;
 
+pub mod terminal;
+
 #[link_section = ".boot2"]
 #[no_mangle]
 #[used]
