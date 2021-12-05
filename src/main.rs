@@ -1,49 +1,106 @@
-//! Blinks the LED on a Pico board
+//! # Pico USB Serial (with Interrupts) Example
 //!
-//! This will blink an LED attached to GP25, which is the pin the Pico uses for the on-board LED.
+//! Creates a USB Serial device on a Pico board, with the USB driver running in
+//! the USB interrupt.
+//!
+//! This will create a USB Serial device echoing anything it receives. Incoming
+//! ASCII characters are converted to upercase, so you can tell it is working
+//! and not just local-echo!
+//!
+//! See the `Cargo.toml` file for Copyright and licence details.
+
 #![no_std]
 #![no_main]
 
+// The macro for our start-up function
 use cortex_m_rt::entry;
-use defmt::*;
-use defmt_rtt as _;
+
+use display_interface_spi::SPIInterface;
 use embedded_graphics::{
+    draw_target::DrawTarget,
     image::{Image, ImageRaw, ImageRawLE},
-    mono_font::{ascii::FONT_9X18, MonoTextStyleBuilder},
-    pixelcolor::Rgb565,
+    mono_font::{iso_8859_15::FONT_6X10, MonoTextStyleBuilder},
+    pixelcolor::{Rgb565, RgbColor},
     prelude::*,
     text::Text,
 };
-use embedded_time::fixed_point::FixedPoint;
-use panic_probe as _;
-use rp2040_hal as hal;
-use rp2040_test::PicoDisplay;
+// The macro for marking our interrupt functions
+use rp2040_test::hal::pac::interrupt;
 
-use hal::{
-    clocks::{init_clocks_and_plls, Clock},
-    pac,
-    sio::Sio,
-    watchdog::Watchdog,
-};
+// GPIO traits
+use embedded_hal::digital::v2::OutputPin;
 
-#[link_section = ".boot2"]
-#[used]
-pub static BOOT2: [u8; 256] = rp2040_boot2::BOOT_LOADER_W25Q080;
+// Time handling traits
+use embedded_time::rate::*;
+
+// Ensure we halt the program on panic (if we don't mention this crate it won't
+// be linked)
+use panic_halt as _;
+
+// Pull in any important traits
+// use pico::hal::prelude::*;
+use rp2040_test::hal::prelude::*;
+
+// A shorter alias for the Peripheral Access Crate, which provides low-level
+// register access
+// use pico::hal::pac;
+use rp2040_test::hal::pac;
+
+// A shorter alias for the Hardware Abstraction Layer, which provides
+// higher-level drivers.
+// use pico::hal;
+use rp2040_test::hal;
+
+// USB Device support
+use usb_device::{class_prelude::*, prelude::*};
+
+// USB Communications Class Device support
+use usbd_serial::SerialPort;
+
+/// The USB Device Driver (shared with the interrupt).
+static mut USB_DEVICE: Option<UsbDevice<hal::usb::UsbBus>> = None;
+
+/// The USB Bus Driver (shared with the interrupt).
+static mut USB_BUS: Option<UsbBusAllocator<hal::usb::UsbBus>> = None;
+
+/// The USB Serial Device Driver (shared with the interrupt).
+static mut USB_SERIAL: Option<SerialPort<hal::usb::UsbBus>> = None;
+
+static mut SCREEN: Option<
+    st7789::ST7789<
+        SPIInterface<
+            hal::spi::Spi<hal::spi::Enabled, pac::SPI0, 8>,
+            hal::gpio::pin::Pin<hal::gpio::pin::bank0::Gpio16, hal::gpio::pin::PushPullOutput>,
+            hal::gpio::pin::Pin<hal::gpio::pin::bank0::Gpio17, hal::gpio::pin::PushPullOutput>,
+        >,
+        rp2040_test::DummyPin,
+    >,
+> = None;
+static mut SCREEN_POS: Option<Point> = None;
 
 static FERRIS: &[u8] = include_bytes!("../ferris.raw");
 
+/// Entry point to our bare-metal application.
+///
+/// The `#[entry]` macro ensures the Cortex-M start-up code calls this function
+/// as soon as all global variables are initialised.
+///
+/// The function configures the RP2040 peripherals, then blinks the LED in an
+/// infinite loop.
 #[entry]
 fn main() -> ! {
-    info!("Program start");
+    // Grab our singleton objects
     let mut pac = pac::Peripherals::take().unwrap();
     let core = pac::CorePeripherals::take().unwrap();
-    let mut watchdog = Watchdog::new(pac.WATCHDOG);
-    let sio = Sio::new(pac.SIO);
 
-    // External high-speed crystal on the pico board is 12Mhz
-    let external_xtal_freq_hz = 12_000_000u32;
-    let clocks = init_clocks_and_plls(
-        external_xtal_freq_hz,
+    // Set up the watchdog driver - needed by the clock setup code
+    let mut watchdog = hal::watchdog::Watchdog::new(pac.WATCHDOG);
+
+    // Configure the clocks
+    //
+    // The default is to generate a 125 MHz system clock
+    let clocks = hal::clocks::init_clocks_and_plls(
+        rp2040_test::XOSC_CRYSTAL_FREQ,
         pac.XOSC,
         pac.CLOCKS,
         pac.PLL_SYS,
@@ -54,32 +111,176 @@ fn main() -> ! {
     .ok()
     .unwrap();
 
+    // Set up the USB driver
+    let usb_bus = UsbBusAllocator::new(hal::usb::UsbBus::new(
+        pac.USBCTRL_REGS,
+        pac.USBCTRL_DPRAM,
+        clocks.usb_clock,
+        true,
+        &mut pac.RESETS,
+    ));
+    unsafe {
+        // Note (safety): This is safe as interrupts haven't been started yet
+        USB_BUS = Some(usb_bus);
+    }
+
+    // Grab a reference to the USB Bus allocator. We are promising to the
+    // compiler not to take mutable access to this global variable whilst this
+    // reference exists!
+    let bus_ref = unsafe { USB_BUS.as_ref().unwrap() };
+
+    // Set up the USB Communications Class Device driver
+    let serial = SerialPort::new(bus_ref);
+    unsafe {
+        USB_SERIAL = Some(serial);
+    }
+
+    // Create a USB device with a fake VID and PID
+    let usb_dev = UsbDeviceBuilder::new(bus_ref, UsbVidPid(0x16c0, 0x27dd))
+        .manufacturer("Fake company")
+        .product("Serial port")
+        .serial_number("TEST")
+        .device_class(2) // from: https://www.usb.org/defined-class-codes
+        .build();
+    unsafe {
+        // Note (safety): This is safe as interrupts haven't been started yet
+        USB_DEVICE = Some(usb_dev);
+    }
+
+    // The delay object lets us wait for specified amounts of time (in
+    // milliseconds)
     let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().integer());
 
-    // Initialize PicoDisplay
-    let mut display = PicoDisplay::new(
+    // The single-cycle I/O block controls our GPIO pins
+    let sio = hal::sio::Sio::new(pac.SIO);
+
+    // Set the pins up according to their function on this particular board
+    let pins = rp2040_test::Pins::new(
         pac.IO_BANK0,
         pac.PADS_BANK0,
         sio.gpio_bank0,
-        pac.SPI0,
         &mut pac.RESETS,
-        &mut delay,
     );
+
+    // Configure the display
+    let dc = pins.lcd_dc.into_push_pull_output();
+    let cs = pins.lcd_cs.into_push_pull_output();
+    let _spi_sclk = pins.spi_sclk.into_mode::<hal::gpio::pin::FunctionSpi>();
+    let _spi_mosi = pins.spi_mosi.into_mode::<hal::gpio::pin::FunctionSpi>();
+
+    let spi_screen = hal::spi::Spi::<_, _, 8>::new(pac.SPI0).init(
+        &mut pac.RESETS,
+        125_000_000u32.Hz(),
+        16_000_000u32.Hz(),
+        &embedded_hal::spi::MODE_0,
+    );
+    let spii_screen = SPIInterface::new(spi_screen, dc, cs);
+    let mut screen = st7789::ST7789::new(spii_screen, rp2040_test::DummyPin, 240, 135);
+    screen.init(&mut delay).unwrap();
+    screen
+        .set_orientation(st7789::Orientation::LandscapeSwapped)
+        .unwrap();
+    screen.clear(Rgb565::BLACK).unwrap();
 
     // Draw ferris
     let ferris: ImageRawLE<Rgb565> = ImageRaw::new(FERRIS, 64);
-    let ferris_img = Image::new(&ferris, Point::new(60, 50));
-    ferris_img.draw(&mut display.screen).unwrap();
+    let ferris_img = Image::new(&ferris, Point::new(40, 50));
+    ferris_img.draw(&mut screen).unwrap();
 
-    // Write some text
-    let text_style = MonoTextStyleBuilder::new()
-        .font(&FONT_9X18)
-        .text_color(Rgb565::new(183, 65, 14))
-        .build();
+    unsafe {
+        SCREEN = Some(screen);
+        SCREEN_POS = Some(Point::new(40, 100));
+    }
 
-    Text::new("Hello, Rust!", Point::new(60, 50 + 43 + 10), text_style)
-        .draw(&mut display.screen)
-        .unwrap();
+    // Enable the USB interrupt
+    unsafe {
+        pac::NVIC::unmask(hal::pac::Interrupt::USBCTRL_IRQ);
+    };
 
-    loop {}
+    // No more USB code after this point in main! We can do anything we want in
+    // here since USB is handled in the interrupt - let's blink an LED!
+
+    // Set the LED to be an output
+    let mut led_pin = pins.led.into_push_pull_output();
+
+    // Blink the LED at 1 Hz
+    loop {
+        led_pin.set_high().unwrap();
+        delay.delay_ms(500);
+        led_pin.set_low().unwrap();
+        delay.delay_ms(500);
+    }
 }
+
+/// This function is called whenever the USB Hardware generates an Interrupt
+/// Request.
+///
+/// We do all our USB work under interrupt, so the main thread can continue on
+/// knowing nothing about USB.
+#[allow(non_snake_case)]
+#[interrupt]
+unsafe fn USBCTRL_IRQ() {
+    use core::sync::atomic::{AtomicBool, Ordering};
+
+    /// Note whether we've already printed the "hello" message.
+    static SAID_HELLO: AtomicBool = AtomicBool::new(false);
+
+    // Grab the global objects. This is OK as we only access them under interrupt.
+    let usb_dev = USB_DEVICE.as_mut().unwrap();
+    let serial = USB_SERIAL.as_mut().unwrap();
+
+    // Say hello exactly once on start-up
+    if !SAID_HELLO.load(Ordering::Relaxed) {
+        SAID_HELLO.store(true, Ordering::Relaxed);
+        let _ = serial.write(b"Hello, World!\r\n");
+    }
+
+    // Poll the USB driver with all of our supported USB Classes
+    if usb_dev.poll(&mut [serial]) {
+        let mut buf = [0u8; 64];
+        match serial.read(&mut buf) {
+            Err(_e) => {
+                // Do nothing
+            }
+            Ok(0) => {
+                // Do nothing
+            }
+            Ok(count) => {
+                // Write to the screen
+                {
+                    let msg = core::str::from_utf8(&buf[0..count]).unwrap();
+                    let screen = SCREEN.as_mut().unwrap();
+                    let screen_pos = SCREEN_POS.as_mut().unwrap();
+                    let text_style = MonoTextStyleBuilder::new()
+                        .font(&FONT_6X10)
+                        .text_color(Rgb565::RED)
+                        .build();
+                    Text::new(msg, *screen_pos, text_style)
+                        .draw(screen)
+                        .unwrap();
+                    // Move the screen position based on character count
+                    screen_pos.x += (count * 6) as i32;
+                    if screen_pos.x >= 280 {
+                        screen_pos.x = 40;
+                        screen_pos.y += 10;
+                    }
+                }
+
+                // Convert to lower case
+                buf.iter_mut().take(count).for_each(|b| {
+                    b.make_ascii_lowercase();
+                });
+
+                // Send back to the host
+                let mut wr_ptr = &buf[..count];
+                while !wr_ptr.is_empty() {
+                    let _ = serial.write(wr_ptr).map(|len| {
+                        wr_ptr = &wr_ptr[len..];
+                    });
+                }
+            }
+        }
+    }
+}
+
+// End of file
