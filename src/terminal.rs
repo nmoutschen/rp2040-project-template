@@ -1,4 +1,11 @@
-use embedded_graphics::{mono_font::MonoTextStyle, prelude::*, text::Text};
+use embedded_graphics::{
+    mono_font::{ascii::FONT_6X10, MonoTextStyle, MonoTextStyleBuilder},
+    prelude::*,
+    text::Text,
+};
+
+// 64 character long string
+static FILLER_STRING: &str = "                                                            ";
 
 pub struct Terminal<'f, C, S> {
     config: TerminalConfig<'f, C, S>,
@@ -7,7 +14,7 @@ pub struct Terminal<'f, C, S> {
 
 impl<'f, C, S> Terminal<'f, C, S>
 where
-    C: PixelColor,
+    C: RgbColor,
     S: DrawTarget<Color = C> + OriginDimensions,
     <S as embedded_graphics::draw_target::DrawTarget>::Error: core::fmt::Debug,
 {
@@ -18,6 +25,11 @@ where
 
     /// Handle a single ASCII character
     pub fn write_char(&mut self, c: u8) {
+        // Erase the cursor
+        if self.config.cursor_color.is_some() {
+            self.erase_chars(1);
+        }
+
         match c {
             0x00..=0x07 => (),
             // Backspace
@@ -35,6 +47,11 @@ where
             // Characters
             _ => self.print_char(c),
         }
+
+        // Redraw the cursor
+        if self.config.cursor_color.is_some() {
+            self.draw_cursor();
+        }
     }
 
     /// Print a single ASCII character
@@ -51,6 +68,23 @@ where
         self.move_forward(1);
     }
 
+    /// Draw the cursor on the screen
+    fn draw_cursor(&mut self) {
+        if let Some(color) = self.config.cursor_color {
+            let style_builder = MonoTextStyleBuilder::new()
+                .font(self.config.style.font)
+                .text_color(color);
+            if let Some(bg_color) = self.config.style.background_color {
+                style_builder.background_color(bg_color);
+            }
+            let style = style_builder.build();
+
+            Text::new("_", self.pos, style)
+                .draw(&mut self.config.screen)
+                .unwrap();
+        }
+    }
+
     /// Move the cursor backwards
     fn move_backward(&mut self, n: i32) {
         // TODO: clear characters
@@ -60,14 +94,18 @@ where
         if new_x >= self.min_x() {
             self.pos.x = new_x;
         }
+
+        self.erase_chars(n);
     }
 
     /// Move the cursor by `count` characters
     ///
     /// If the cursor ends up outside the bounds of the screen, it will be moved to the next line.
     fn move_forward(&mut self, n: i32) {
-        let new_x = self.pos.x + n * self.config.style.font.character_size.width as i32;
-        if new_x >= self.max_x() {
+        let char_width = self.config.style.font.character_size.width as i32;
+
+        let new_x = self.pos.x + n * char_width;
+        if new_x + char_width > self.max_x() {
             // Going to the next line
             self.move_next_line();
         } else {
@@ -82,17 +120,36 @@ where
 
     /// Move to the next line
     fn move_next_line(&mut self) {
+        let char_height = self.config.style.font.character_size.height as i32;
+
         // Reset x position to the beginning of the line
         self.pos.x = self.min_x();
 
-        let new_y = self.pos.y + self.config.style.font.character_size.height as i32;
-        if new_y >= self.max_y() {
+        let new_y = self.pos.y + char_height;
+        if new_y + char_height > self.max_y() {
             // Looping to the beginning of the screen
             // TODO: Clear the display or scroll the screen
             self.pos.y = self.config.offset.y;
         } else {
             self.pos.y = new_y;
         }
+
+        self.erase_chars(FILLER_STRING.len() as i32);
+    }
+
+    fn erase_chars(&mut self, n: i32) {
+        // Erase characters
+        let color = match self.config.style.background_color {
+            Some(color) => color,
+            None => C::BLACK,
+        };
+        let style = MonoTextStyleBuilder::new()
+            .font(self.config.style.font)
+            .background_color(color)
+            .build();
+        Text::new(&FILLER_STRING[..n as usize], self.pos, style)
+            .draw(&mut self.config.screen)
+            .unwrap();
     }
 
     /// Maximum X coordinate for the screen
@@ -118,6 +175,7 @@ where
 struct TerminalConfig<'f, C, S> {
     screen: S,
     offset: Point,
+    cursor_color: Option<C>,
     style: MonoTextStyle<'f, C>,
 }
 
@@ -126,24 +184,39 @@ pub struct TerminalBuilder<'f, C, S> {
     config: TerminalConfig<'f, C, S>,
 }
 
-impl<'f, C, S> TerminalBuilder<'f, C, S> {
-    pub fn new(screen: S, style: MonoTextStyle<'f, C>) -> Self {
+impl<'f, C, S> TerminalBuilder<'f, C, S>
+where
+    C: RgbColor,
+{
+    // pub fn new(screen: S, style: MonoTextStyle<'f, C>) -> Self {
+    pub fn new(screen: S) -> Self {
         Self {
             config: TerminalConfig {
                 screen,
                 offset: Point::new(0, 0),
-                style,
+                cursor_color: None,
+                style: MonoTextStyleBuilder::new()
+                    .font(&FONT_6X10)
+                    .text_color(C::RED)
+                    .background_color(C::BLACK)
+                    .build(),
             },
         }
     }
 
-    pub fn with_offset(self, offset: Point) -> Self {
-        Self {
-            config: TerminalConfig {
-                offset,
-                ..self.config
-            },
-        }
+    pub fn with_offset(mut self, offset: Point) -> Self {
+        self.config.offset = offset;
+        self
+    }
+
+    pub fn with_cursor(mut self, color: C) -> Self {
+        self.config.cursor_color = Some(color);
+        self
+    }
+
+    pub fn with_style(mut self, style: MonoTextStyle<'f, C>) -> Self {
+        self.config.style = style;
+        self
     }
 
     pub fn build(self) -> Terminal<'f, C, S> {

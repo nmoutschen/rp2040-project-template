@@ -19,7 +19,6 @@ use display_interface_spi::SPIInterface;
 use embedded_graphics::{
     draw_target::DrawTarget,
     image::{Image, ImageRaw, ImageRawLE},
-    mono_font::{iso_8859_15::FONT_6X10, MonoTextStyleBuilder},
     pixelcolor::{Rgb565, RgbColor},
     prelude::*,
 };
@@ -66,17 +65,6 @@ static mut USB_BUS: Option<UsbBusAllocator<hal::usb::UsbBus>> = None;
 /// The USB Serial Device Driver (shared with the interrupt).
 static mut USB_SERIAL: Option<SerialPort<hal::usb::UsbBus>> = None;
 
-// static mut SCREEN: Option<
-//     st7789::ST7789<
-//         SPIInterface<
-//             hal::spi::Spi<hal::spi::Enabled, pac::SPI0, 8>,
-//             hal::gpio::pin::Pin<hal::gpio::pin::bank0::Gpio16, hal::gpio::pin::PushPullOutput>,
-//             hal::gpio::pin::Pin<hal::gpio::pin::bank0::Gpio17, hal::gpio::pin::PushPullOutput>,
-//         >,
-//         rp2040_test::DummyPin,
-//     >,
-// > = None;
-// static mut SCREEN_POS: Option<Point> = None;
 static mut TERMINAL: Option<
     Terminal<
         Rgb565,
@@ -201,20 +189,13 @@ fn main() -> ! {
     ferris_img.draw(&mut screen).unwrap();
 
     // Setup the terminal
-    let mut terminal = TerminalBuilder::new(
-        screen,
-        MonoTextStyleBuilder::new()
-            .font(&FONT_6X10)
-            .text_color(Rgb565::RED)
-            .build(),
-    )
-    .with_offset(Point::new(40, 60))
-    .build();
+    let mut terminal = TerminalBuilder::new(screen)
+        .with_cursor(Rgb565::GREEN)
+        .with_offset(Point::new(40, 59))
+        .build();
     terminal.write(b"Hello, world!\n");
 
     unsafe {
-        // SCREEN = Some(screen);
-        // SCREEN_POS = Some(Point::new(40, 100));
         TERMINAL = Some(terminal);
     }
 
